@@ -1,0 +1,28 @@
+import {readFileSync} from 'node:fs';
+import ts from 'typescript';
+import assert from 'node:assert/strict';
+const source=ts.transpileModule(readFileSync('app/api/activation/route.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.ESNext,target:ts.ScriptTarget.ES2022}}).outputText;
+const {POST}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
+let calls=[];
+const response=data=>Response.json({code:0,data});
+const valid={valid:true,product_code:'claude_pro',supported_recharge_modes:['claude_org']};
+const base={visitor:'test-visitor',code:'TEST-ONLY',mode:'claude_org',account:'test-org',confirm:'test-org',ack:true};
+async function request(body,origin='https://test.local'){return POST(new Request('https://test.local/api/activation',{method:'POST',headers:{Origin:origin},body:JSON.stringify({...base,...body})}))}
+globalThis.fetch=async (url,opts)=>{calls.push({url,opts});return response({valid:false})};
+assert.equal((await request({action:'verify'})).status,400);
+assert.equal(calls.length,1);
+calls=[];assert.equal((await request({action:'redeem',confirm:'different'})).status,400);assert.equal(calls.length,0);
+assert.equal((await request({action:'redeem',ack:false})).status,400);assert.equal(calls.length,0);
+assert.equal((await request({action:'redeem'},'https://other.local')).status,403);assert.equal(calls.length,0);
+globalThis.fetch=async(url,opts)=>{calls.push({url,opts});return url.endsWith('/cards/probe')?response(valid):response({order_no:'TEST-ORDER',status:2,query_token:'TEST-TOKEN',private_data:'must not leak'})};
+const activation=await (await request({action:'redeem'})).json();
+assert.deepEqual(activation.data,{order_no:'TEST-ORDER',status:2,query_token:'TEST-TOKEN'});
+assert.equal(calls.filter(c=>c.url.endsWith('/redeem')).length,1);
+const sent=JSON.parse(calls[1].opts.body);assert.equal(sent.account_id,'test-org');assert.equal(sent.confirm_overwrite,false);assert.equal(calls[1].opts.redirect,'manual');
+calls=[];assert.equal((await request({action:'redeem',mode:'claude_session_key',session:'sk-test-only'})).status,400);assert.equal(calls.length,1);
+globalThis.fetch=async()=>Response.json({code:100601,message:'非英语内容'});const captcha=await (await request({action:'verify'})).json();assert.match(captcha.error,/security check/);assert.doesNotMatch(captcha.error,/[\u4e00-\u9fff]/);
+calls=[];globalThis.fetch=async(url,opts)=>{calls.push({url,opts});return response({order_no:'TEST-ORDER',status:3,secret:'hidden'})};
+const restored=await (await request({action:'order',order:'TEST-ORDER',token:'TEST-TOKEN'})).json();assert.equal(restored.data.status,3);assert.equal(calls[0].opts.headers['X-Order-Query-Token'],'TEST-TOKEN');assert.equal(restored.data.secret,undefined);
+calls=[];globalThis.fetch=async(url,opts)=>{calls.push({url,opts});if(url.endsWith('/cards/probe'))return response(valid);throw new Error('timeout')};
+assert.equal((await request({action:'redeem'})).status,502);assert.equal(calls.filter(c=>c.url.endsWith('/redeem')).length,1);
+console.log('PASS: validation, confirmation, origin checks, mode restrictions, one-time submission, English errors, private order retrieval, uncertain-result handling. No real activations performed.');
